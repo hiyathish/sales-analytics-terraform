@@ -365,6 +365,10 @@ resource "aws_glue_catalog_table" "customers" {
       name = "signup_date"
       type = "date"
     }
+    columns {
+      name = "last_updated_date"
+      type = "date"
+    }
   }
 }
 
@@ -429,6 +433,10 @@ resource "aws_glue_catalog_table" "sales_orders" {
     columns {
       name = "line_total"
       type = "decimal(12,2)"
+    }
+    columns {
+      name = "last_updated_date"
+      type = "date"
     }
   }
 }
