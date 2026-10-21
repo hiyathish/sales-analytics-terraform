@@ -281,6 +281,42 @@ resource "aws_iam_role_policy" "glue_jobs_data" {
   policy = data.aws_iam_policy_document.glue_jobs_data.json
 }
 
+# --- Stage 3b: customers curation job ----------------------------------------
+
+resource "aws_s3_object" "customers_script" {
+  bucket = var.bucket_name
+  key    = "glue-scripts/customers_curate.py"
+  source = "glue/customers_curate.py"
+  etag   = filemd5("glue/customers_curate.py")
+}
+
+resource "aws_glue_job" "customers_curate" {
+  name         = "sales-analytics-customers-curate-${var.environment}"
+  role_arn     = aws_iam_role.glue_jobs.arn
+  glue_version = "3.0"
+  max_capacity = 0.0625
+  max_retries  = 0
+  timeout      = 20
+
+  command {
+    name            = "pythonshell"
+    python_version  = "3.9"
+    script_location = "s3://${var.bucket_name}/glue-scripts/customers_curate.py"
+  }
+
+  default_arguments = {
+    #  "--additional-python-modules" = "fastavro==1.9.4,pyarrow==14.0.2"
+    "--additional-python-modules" = "pyarrow==14.0.2"
+    "--bucket"                    = var.bucket_name
+    "--database"                  = aws_glue_catalog_database.sales.name
+    "--table"                     = "customers"
+    "--raw_prefix"                = "avro_datastage_files/customers/"
+    "--curated_prefix"            = "curated/customers/"
+  }
+
+  depends_on = [aws_s3_object.customers_script]
+}
+
 # ---------- Outputs ----------
 
 output "database_name" {
@@ -440,3 +476,4 @@ resource "aws_glue_catalog_table" "sales_orders" {
     }
   }
 }
+
