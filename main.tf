@@ -317,6 +317,41 @@ resource "aws_glue_job" "customers_curate" {
   depends_on = [aws_s3_object.customers_script]
 }
 
+# --- Stage 3c: sales orders curation job -------------------------------------
+
+resource "aws_s3_object" "sales_orders_script" {
+  bucket = var.bucket_name
+  key    = "glue-scripts/sales_orders_curate.py"
+  source = "glue/sales_orders_curate.py"
+  etag   = filemd5("glue/sales_orders_curate.py")
+}
+
+resource "aws_glue_job" "sales_orders_curate" {
+  name         = "sales-analytics-sales-orders-curate-${var.environment}"
+  role_arn     = aws_iam_role.glue_jobs.arn
+  glue_version = "3.0"
+  max_capacity = 0.0625
+  max_retries  = 0
+  timeout      = 20
+
+  command {
+    name            = "pythonshell"
+    python_version  = "3.9"
+    script_location = "s3://${var.bucket_name}/glue-scripts/sales_orders_curate.py"
+  }
+
+  default_arguments = {
+    "--additional-python-modules" = "pyarrow==14.0.2"
+    "--bucket"                    = var.bucket_name
+    "--database"                  = aws_glue_catalog_database.sales.name
+    "--table"                     = "sales_orders"
+    "--raw_prefix"                = "avro_datastage_files/sales_orders/"
+    "--curated_prefix"            = "curated/sales_orders/"
+  }
+
+  depends_on = [aws_s3_object.sales_orders_script]
+}
+
 # ---------- Outputs ----------
 
 output "database_name" {
