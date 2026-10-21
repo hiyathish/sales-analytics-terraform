@@ -224,3 +224,137 @@ output "reader_group_name" {
 output "curated_location" {
   value = "s3://${data.aws_s3_bucket.data.bucket}/${local.curated_prefix}"
 }
+
+# --- Stage 2: curated catalog tables -----------------------------------------
+# Both tables read Parquet from the curated folders. Raw Avro is never queried
+# directly. Stage 3 writes the curated files and registers the monthly partitions.
+
+resource "aws_glue_catalog_table" "customers" {
+  name          = "customers"
+  database_name = aws_glue_catalog_database.sales.name
+  table_type    = "EXTERNAL_TABLE"
+
+  parameters = {
+    EXTERNAL              = "TRUE"
+    classification        = "parquet"
+    "parquet.compression" = "SNAPPY"
+  }
+
+  partition_keys {
+    name = "signup_month"
+    type = "string"
+  }
+
+  storage_descriptor {
+    location      = "s3://${var.bucket_name}/curated/customers/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    }
+
+    columns {
+      name = "customer_id"
+      type = "string"
+    }
+    columns {
+      name = "first_name"
+      type = "string"
+    }
+    columns {
+      name = "last_name"
+      type = "string"
+    }
+    columns {
+      name = "email"
+      type = "string"
+    }
+    columns {
+      name = "city"
+      type = "string"
+    }
+    columns {
+      name = "state"
+      type = "string"
+    }
+    columns {
+      name = "zip_code"
+      type = "string"
+    }
+    columns {
+      name = "segment"
+      type = "string"
+    }
+    columns {
+      name = "signup_date"
+      type = "date"
+    }
+  }
+}
+
+resource "aws_glue_catalog_table" "sales_orders" {
+  name          = "sales_orders"
+  database_name = aws_glue_catalog_database.sales.name
+  table_type    = "EXTERNAL_TABLE"
+
+  parameters = {
+    EXTERNAL              = "TRUE"
+    classification        = "parquet"
+    "parquet.compression" = "SNAPPY"
+  }
+
+  partition_keys {
+    name = "order_month"
+    type = "string"
+  }
+
+  storage_descriptor {
+    location      = "s3://${var.bucket_name}/curated/sales_orders/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+    compressed    = true
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    }
+
+    columns {
+      name = "order_id"
+      type = "string"
+    }
+    columns {
+      name = "order_date"
+      type = "date"
+    }
+    columns {
+      name = "customer_id"
+      type = "string"
+    }
+    columns {
+      name = "product_id"
+      type = "string"
+    }
+    columns {
+      name = "product_name"
+      type = "string"
+    }
+    columns {
+      name = "category"
+      type = "string"
+    }
+    columns {
+      name = "quantity"
+      type = "int"
+    }
+    columns {
+      name = "unit_price"
+      type = "decimal(10,2)"
+    }
+    columns {
+      name = "line_total"
+      type = "decimal(12,2)"
+    }
+  }
+}
