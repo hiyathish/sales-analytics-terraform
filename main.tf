@@ -12,6 +12,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 
   backend "s3" {}
@@ -350,6 +354,96 @@ resource "aws_glue_job" "sales_orders_curate" {
   }
 
   depends_on = [aws_s3_object.sales_orders_script]
+}
+
+# --- Stage 4: file trigger ---------------------------------------------------
+
+data "archive_file" "start_glue_jobs" {
+  type        = "zip"
+  source_file = "lambda/start_glue_jobs.py"
+  output_path = "start_glue_jobs.zip"
+}
+
+data "aws_iam_policy_document" "lambda_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "start_jobs" {
+  name               = "sales-analytics-lambda-${var.environment}"
+  assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_logs" {
+  role       = aws_iam_role.start_jobs.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+data "aws_iam_policy_document" "start_jobs" {
+  statement {
+    sid     = "StartAndWatchGlueJobs"
+    actions = ["glue:StartJobRun", "glue:GetJobRun"]
+    resources = [
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.customers_curate.name}",
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.sales_orders_curate.name}",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "start_jobs" {
+  name   = "start-glue-jobs"
+  role   = aws_iam_role.start_jobs.id
+  policy = data.aws_iam_policy_document.start_jobs.json
+}
+
+resource "aws_lambda_function" "start_jobs" {
+  function_name    = "sales-analytics-start-jobs-${var.environment}"
+  role             = aws_iam_role.start_jobs.arn
+  runtime          = "python3.12"
+  handler          = "start_glue_jobs.handler"
+  filename         = data.archive_file.start_glue_jobs.output_path
+  source_code_hash = data.archive_file.start_glue_jobs.output_base64sha256
+  timeout          = 900
+
+  environment {
+    variables = {
+      CUSTOMERS_JOB    = aws_glue_job.customers_curate.name
+      SALES_ORDERS_JOB = aws_glue_job.sales_orders_curate.name
+    }
+  }
+}
+
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id   = "AllowS3Invoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.start_jobs.function_name
+  principal      = "s3.amazonaws.com"
+  source_arn     = "arn:aws:s3:::${var.bucket_name}"
+  source_account = var.aws_account_id
+}
+
+resource "aws_s3_bucket_notification" "raw_extracts" {
+  bucket = var.bucket_name
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.start_jobs.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "avro_datastage_files/customers/"
+  }
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.start_jobs.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "avro_datastage_files/sales_orders/"
+  }
+
+  depends_on = [aws_lambda_permission.allow_s3]
 }
 
 # ---------- Outputs ----------

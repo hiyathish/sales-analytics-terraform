@@ -9,3 +9,4 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 .env
+start_glue_jobs.zip
