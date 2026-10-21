@@ -207,6 +207,80 @@ resource "aws_iam_user_group_membership" "readers" {
   groups   = [aws_iam_group.readers.name]
 }
 
+# --- Stage 3a: role the Glue jobs run as -------------------------------------
+
+data "aws_iam_policy_document" "glue_jobs_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["glue.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "glue_jobs" {
+  name               = "sales-analytics-glue-${var.environment}"
+  assume_role_policy = data.aws_iam_policy_document.glue_jobs_trust.json
+}
+
+# AWS managed baseline for Glue: logging and service access
+resource "aws_iam_role_policy_attachment" "glue_service" {
+  role       = aws_iam_role.glue_jobs.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+}
+
+data "aws_iam_policy_document" "glue_jobs_data" {
+  statement {
+    sid     = "ReadRawFiles"
+    actions = ["s3:GetObject", "s3:ListBucket"]
+    resources = [
+      "arn:aws:s3:::${var.bucket_name}",
+      "arn:aws:s3:::${var.bucket_name}/avro_datastage_files/*",
+    ]
+  }
+
+  statement {
+    sid       = "WriteCurated"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["arn:aws:s3:::${var.bucket_name}/curated/*"]
+  }
+
+  statement {
+    sid     = "ScriptsAndTemp"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "arn:aws:s3:::${var.bucket_name}/glue-scripts/*",
+      "arn:aws:s3:::${var.bucket_name}/glue-temp/*",
+    ]
+  }
+
+  statement {
+    sid = "CatalogPartitions"
+    actions = [
+      "glue:GetTable",
+      "glue:GetPartition",
+      "glue:GetPartitions",
+      "glue:BatchGetPartition",
+      "glue:CreatePartition",
+      "glue:BatchCreatePartition",
+      "glue:UpdatePartition",
+    ]
+    resources = [
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:catalog",
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:database/${aws_glue_catalog_database.sales.name}",
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:table/${aws_glue_catalog_database.sales.name}/*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "glue_jobs_data" {
+  name   = "sales-analytics-glue-data"
+  role   = aws_iam_role.glue_jobs.id
+  policy = data.aws_iam_policy_document.glue_jobs_data.json
+}
+
 # ---------- Outputs ----------
 
 output "database_name" {
