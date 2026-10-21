@@ -67,6 +67,11 @@ variable "reader_users" {
   default     = []
 }
 
+variable "notify_email" {
+  description = "Email address that receives pipeline status messages."
+  type        = string
+}
+
 # ---------- Derived names ----------
 
 locals {
@@ -387,12 +392,9 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
 
 data "aws_iam_policy_document" "start_jobs" {
   statement {
-    sid     = "StartAndWatchGlueJobs"
-    actions = ["glue:StartJobRun", "glue:GetJobRun"]
-    resources = [
-      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.customers_curate.name}",
-      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.sales_orders_curate.name}",
-    ]
+    sid       = "StartPipeline"
+    actions   = ["states:StartExecution"]
+    resources = [aws_sfn_state_machine.pipeline.arn]
   }
 }
 
@@ -409,12 +411,11 @@ resource "aws_lambda_function" "start_jobs" {
   handler          = "start_glue_jobs.handler"
   filename         = data.archive_file.start_glue_jobs.output_path
   source_code_hash = data.archive_file.start_glue_jobs.output_base64sha256
-  timeout          = 900
+  timeout          = 60
 
   environment {
     variables = {
-      CUSTOMERS_JOB    = aws_glue_job.customers_curate.name
-      SALES_ORDERS_JOB = aws_glue_job.sales_orders_curate.name
+      STATE_MACHINE_ARN = aws_sfn_state_machine.pipeline.arn
     }
   }
 }
@@ -444,6 +445,131 @@ resource "aws_s3_bucket_notification" "raw_extracts" {
   }
 
   depends_on = [aws_lambda_permission.allow_s3]
+}
+
+# --- Stage 5: orchestration and notifications --------------------------------
+
+resource "aws_sns_topic" "pipeline_status" {
+  name = "sales-analytics-status-${var.environment}"
+}
+
+resource "aws_sns_topic_subscription" "pipeline_email" {
+  topic_arn = aws_sns_topic.pipeline_status.arn
+  protocol  = "email"
+  endpoint  = var.notify_email
+}
+
+data "aws_iam_policy_document" "sfn_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["states.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "pipeline" {
+  name               = "sales-analytics-sfn-${var.environment}"
+  assume_role_policy = data.aws_iam_policy_document.sfn_trust.json
+}
+
+data "aws_iam_policy_document" "pipeline" {
+  statement {
+    sid     = "RunGlueJobs"
+    actions = ["glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns", "glue:BatchStopJobRun"]
+    resources = [
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.customers_curate.name}",
+      "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:job/${aws_glue_job.sales_orders_curate.name}",
+    ]
+  }
+
+  statement {
+    sid       = "WatchGlueJobs"
+    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
+    resources = ["arn:aws:events:${var.aws_region}:${var.aws_account_id}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"]
+  }
+
+  statement {
+    sid       = "PublishStatus"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.pipeline_status.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "pipeline" {
+  name   = "run-pipeline"
+  role   = aws_iam_role.pipeline.id
+  policy = data.aws_iam_policy_document.pipeline.json
+}
+
+resource "aws_sfn_state_machine" "pipeline" {
+  name     = "sales-analytics-pipeline-${var.environment}"
+  role_arn = aws_iam_role.pipeline.arn
+
+  definition = jsonencode({
+    Comment = "Wait for both extract files, then curate customers and sales orders"
+    StartAt = "WaitForBothFiles"
+    States = {
+      WaitForBothFiles = {
+        Type    = "Wait"
+        Seconds = 120
+        Next    = "CurateCustomers"
+      }
+      CurateCustomers = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = { JobName = aws_glue_job.customers_curate.name }
+        Retry = [{
+          ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
+          IntervalSeconds = 60
+          MaxAttempts     = 20
+          BackoffRate     = 1
+        }]
+        Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "NotifyFailure" }]
+        Next  = "CurateSalesOrders"
+      }
+      CurateSalesOrders = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = { JobName = aws_glue_job.sales_orders_curate.name }
+        Retry = [{
+          ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
+          IntervalSeconds = 60
+          MaxAttempts     = 20
+          BackoffRate     = 1
+        }]
+        Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.error", Next = "NotifyFailure" }]
+        Next  = "NotifySuccess"
+      }
+      NotifySuccess = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          TopicArn = aws_sns_topic.pipeline_status.arn
+          Subject  = "Sales analytics ${var.environment}: curation succeeded"
+          Message  = "Customers and sales orders were curated successfully."
+        }
+        End = true
+      }
+      NotifyFailure = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          TopicArn    = aws_sns_topic.pipeline_status.arn
+          Subject     = "Sales analytics ${var.environment}: curation FAILED"
+          "Message.$" = "States.JsonToString($.error)"
+        }
+        Next = "Failed"
+      }
+      Failed = {
+        Type  = "Fail"
+        Error = "CurationFailed"
+        Cause = "See the status email for details."
+      }
+    }
+  })
 }
 
 # ---------- Outputs ----------
